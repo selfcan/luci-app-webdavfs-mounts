@@ -1,5 +1,5 @@
 PKG_NAME:=luci-app-webdavfs-mounts
-PKG_VERSION:=0.1
+PKG_VERSION:=0.2
 PKG_RELEASE:=1
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=Janlay Wu

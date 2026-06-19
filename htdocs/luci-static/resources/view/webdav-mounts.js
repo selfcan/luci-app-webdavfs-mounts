@@ -105,6 +105,20 @@ function buildWebdavUrl(use_https, host, port, prefix) {
 	return '%s://%s%s%s'.format(proto, host, portPart, prefix);
 }
 
+function buildWebdavMountUrl(use_https, host, port, prefix) {
+	var proto = use_https ? 'https' : 'http';
+	var defaultPort = use_https ? '443' : '80';
+
+	host = (host || '').trim();
+	port = port || defaultPort;
+	prefix = normalizePrefix(prefix);
+
+	if (!host)
+		return null;
+
+	return '%s://%s:%s%s'.format(proto, host, port, prefix);
+}
+
 function webdavUrl(section_id) {
 	var use_https = uci.get('webdav-mounts', section_id, 'use_https') === '1';
 	var host = uci.get('webdav-mounts', section_id, 'host') || '';
@@ -113,6 +127,159 @@ function webdavUrl(section_id) {
 	var prefix = normalizePrefix(uci.get('webdav-mounts', section_id, 'path_prefix'));
 
 	return buildWebdavUrl(use_https, host, port, prefix);
+}
+
+function webdavMountUrl(section_id) {
+	var use_https = uci.get('webdav-mounts', section_id, 'use_https') === '1';
+	var host = uci.get('webdav-mounts', section_id, 'host') || '';
+	var defaultPort = use_https ? '443' : '80';
+	var port = uci.get('webdav-mounts', section_id, 'port') || defaultPort;
+	var prefix = normalizePrefix(uci.get('webdav-mounts', section_id, 'path_prefix'));
+
+	return buildWebdavMountUrl(use_https, host, port, prefix);
+}
+
+function cleanMountDir(path) {
+	path = (path || '').trim().replace(/\/+$/, '');
+	return path || '/';
+}
+
+function currentBaseMountDir() {
+	var globalSection = firstGlobalSection();
+
+	if (!globalSection)
+		return '/mnt/openlist';
+
+	return (getConfigValue(globalSection, 'base_mount_dir', 'base_mount_point', '/mnt/openlist') || '').trim();
+}
+
+function mountDirForEntry(section_id) {
+	var mode = uci.get('webdav-mounts', section_id, 'mount_dir_mode') || 'default';
+	var name = uci.get('webdav-mounts', section_id, 'name') || '';
+	var base, mountDir;
+
+	if (mode === 'custom')
+		mountDir = uci.get('webdav-mounts', section_id, 'mount_dir') || '';
+	else {
+		base = currentBaseMountDir();
+		mountDir = (base && name) ? joinMountDir(base, name) : '';
+	}
+
+	return mountDir ? cleanMountDir(mountDir) : '';
+}
+
+function entryLabel(section_id) {
+	return uci.get('webdav-mounts', section_id, 'name') || section_id;
+}
+
+function assertUniqueMountDirs() {
+	var seen = {};
+
+	uci.sections('webdav-mounts', 'mount', function(s) {
+		var section_id = s['.name'];
+		var mountDir = mountDirForEntry(section_id);
+		var key = mountDir ? cleanMountDir(mountDir) : '';
+
+		if (!key)
+			return;
+
+		if (seen[key] != null)
+			throw new Error('Mount Directory "%s" is already used by "%s" and "%s".'.format(key, seen[key], entryLabel(section_id)));
+
+		seen[key] = entryLabel(section_id);
+	});
+}
+
+function mountEntriesForSave(section_ids) {
+	var filter = null;
+	var entries = [];
+
+	if (section_ids != null) {
+		filter = {};
+		for (var i = 0; i < section_ids.length; i++)
+			filter[section_ids[i]] = true;
+	}
+
+	uci.sections('webdav-mounts', 'mount', function(s) {
+		var section_id = s['.name'];
+		var mountDir, mountUrl, displayUrl;
+
+		if (filter != null && !filter[section_id])
+			return;
+
+		mountDir = mountDirForEntry(section_id);
+		mountUrl = webdavMountUrl(section_id);
+		displayUrl = webdavUrl(section_id);
+
+		if (!mountDir || !mountUrl)
+			return;
+
+		entries.push({
+			section_id: section_id,
+			label: entryLabel(section_id),
+			mountDir: mountDir,
+			mountUrl: mountUrl,
+			displayUrl: displayUrl
+		});
+	});
+
+	return entries;
+}
+
+function prepareMountDir(entry) {
+	return L.resolveDefault(fs.exec('/etc/init.d/webdav-mounts', [
+		'prepare_dir',
+		entry.mountDir,
+		entry.mountUrl,
+		entry.displayUrl
+	]), { code: 1, stdout: '', stderr: 'Unable to prepare mount directory' }).then(function(res) {
+		var detail;
+
+		if (res.code === 0)
+			return true;
+
+		detail = shortenProbeText(res.stderr || res.stdout, '', '');
+		throw new Error('Mount Directory "%s" for "%s" is not usable: %s'.format(entry.mountDir, entry.label, detail));
+	});
+}
+
+function validateMountDirsBeforeSave(section_ids) {
+	var entries, chain;
+
+	assertUniqueMountDirs();
+	entries = mountEntriesForSave(section_ids);
+	chain = Promise.resolve();
+
+	entries.forEach(function(entry) {
+		chain = chain.then(function() {
+			return prepareMountDir(entry);
+		});
+	});
+
+	return chain;
+}
+
+function wrapMountDirSave(map, section_ids) {
+	var save;
+
+	if (map._webdavMountDirSaveWrapped)
+		return;
+
+	save = map.save;
+	map.save = function(cb, silent) {
+		var self = this;
+
+		return save.call(this, function() {
+			var args = arguments;
+
+			return validateMountDirsBeforeSave(section_ids).then(function() {
+				if (cb != null)
+					return cb.apply(self, args);
+			});
+		}, silent);
+	};
+
+	map._webdavMountDirSaveWrapped = true;
 }
 
 function addMountOptionsHelp(option) {
@@ -478,6 +645,7 @@ return view.extend({
 
 		m = new form.Map('webdav-mounts', 'WebDAV Mounts', 'Manage WebDAV mounts using mount.webdavfs.');
 		m.readonly = !mainBinary.available ? true : m.readonly;
+		wrapMountDirSave(m);
 
 		s = m.section(form.TypedSection, 'global', 'Service');
 		s.anonymous = true;
@@ -789,6 +957,8 @@ return view.extend({
 
 			s.addModalOptions = function(modalSection, section_id) {
 				var ss, so;
+
+			wrapMountDirSave(modalSection.map, [ section_id ]);
 
 			so = modalSection.option(form.SectionValue, '_override', form.NamedSection, section_id, 'mount', '');
 			so.renderWidget = function(section_id, option_index, cfgvalue) {

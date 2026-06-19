@@ -14,7 +14,11 @@
 			"uci": [ "webdav-mounts" ]
 		},
 		"write": {
+			"file": {
+				"/etc/init.d/webdav-mounts prepare_dir": [ "exec" ]
+			},
 			"ubus": {
+				"file": [ "exec" ],
 				"rc": [ "init" ]
 			},
 			"uci": [ "webdav-mounts" ]
