@@ -2,7 +2,6 @@ name: Release packages
 
 on:
   push:
-    branches: [master]
     tags: ["v*"]
 
 permissions:
@@ -36,10 +35,13 @@ jobs:
             version="${BASH_REMATCH[1]}"
           fi
 
-          if [[ -z "$version" || "$version" == "$tag" && "$tag" == refs/* ]]; then
-            echo "Unable to derive package version from tag: $tag" >&2
+          if [[ ! "$version" =~ ^[0-9]+([.][0-9]+)*([._+~][0-9A-Za-z]+)*$ ]]; then
+            echo "Unable to derive a valid package version from tag: $tag" >&2
+            echo "Expected tag format: vX.Y[.Z] or vX.Y[.Z]-rN" >&2
             exit 1
           fi
+
+          echo "Resolved package version: $version-r$release"
 
           {
             echo "PACKAGE_VERSION=$version"
@@ -124,11 +126,9 @@ jobs:
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
             gh release edit "$GITHUB_REF_NAME" \
               --title "$GITHUB_REF_NAME" \
-              --notes-file release-notes.md \
-              --generate-notes
+              --notes-file release-notes.md
           else
             gh release create "$GITHUB_REF_NAME" dist/* \
               --title "$GITHUB_REF_NAME" \
-              --notes-file release-notes.md \
-              --generate-notes
+              --notes-file release-notes.md
           fi
